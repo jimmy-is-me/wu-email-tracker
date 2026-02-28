@@ -134,18 +134,26 @@ add_action( 'admin_init', function () {
 global $wu_api_email_sent;
 $wu_api_email_sent = false;
 
-// ===== 選單註冊 =====
+// ===== 選單註冊（隱藏選單，透過外掛頁面「設定」連結進入）=====
 
 add_action( 'admin_menu', function () {
-    add_menu_page(
+    // 掛在 Settings 下但不顯示於側邊欄，僅供直接 URL 存取
+    add_submenu_page(
+        null,                            // 父選單設為 null → 不顯示在側邊欄
         'WU Email Tracker',
-        'WU 郵件追蹤',
+        'WU Email Tracker',
         'manage_options',
         'wu-email-tracker',
-        'wu_email_tracker_settings_page',
-        'dashicons-email-alt2',
-        30
+        'wu_email_tracker_settings_page'
     );
+} );
+
+// ===== 外掛列表「設定」快捷連結 =====
+
+add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), function ( $links ) {
+    $settings_link = '<a href="' . admin_url( 'admin.php?page=wu-email-tracker' ) . '">設定</a>';
+    array_unshift( $links, $settings_link );
+    return $links;
 } );
 
 // ===== Dashboard Widget =====
