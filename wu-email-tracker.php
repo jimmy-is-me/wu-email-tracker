@@ -1,41 +1,20 @@
 <?php
-/**
- * Plugin Name: WU Email Tracker
- * Plugin URI:  https://wumetax.com
- * Description: WordPress 郵件追蹤與管理系統 - 支援額度管理、Resend API、Brevo API、SMTP、Discord 通知
- * Version:     1.1.0
- * Author:      Wumetax
- * Author URI:  https://wumetax.com
- * License:     GPL-2.0+
- * Text Domain: wu-email-tracker
- * Requires at least: 5.8
- * Requires PHP: 7.4
- */
-
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-// ===== 常數定義 =====
+/*
+ * WumetaxToolkit - Email Tracking & Management System
+ * Version: 3.6
+ *
+ * 修正:
+ * - 使用 pre_wp_mail filter 完全接管 API 發信流程
+ * - Elementor / 其他表單外掛不再顯示 "Mail not found" 錯誤
+ * - 掛載於 wumetax-toolkit 子選單
+ */
 
-define( 'WU_EMAIL_TRACKER_VERSION', '1.1.0' );
-define( 'WU_EMAIL_TRACKER_DB_VERSION', '1.1' );
-define( 'WU_EMAIL_TRACKER_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
-define( 'WU_EMAIL_TRACKER_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
-
-// ===== 啟用 / 停用 Hook =====
-
-register_activation_hook( __FILE__, 'wu_email_tracker_install' );
-register_deactivation_hook( __FILE__, 'wu_email_tracker_deactivate' );
-
-function wu_email_tracker_deactivate() {
-    // 停用時不刪除資料,保留紀錄
-}
-
-// ===== Debug 日誌功能 =====
+// ===== Debug 日誌 =====
 
 function wu_debug_log( $message ) {
-    if ( ! get_option( 'wu_email_debug_enabled', 0 ) ) {
-        return;
-    }
+    if ( ! get_option( 'wu_email_debug_enabled', 0 ) ) return;
     $log_file  = WP_CONTENT_DIR . '/wu-email-tracker-debug.log';
     $timestamp = date( 'Y-m-d H:i:s' );
     file_put_contents( $log_file, "[{$timestamp}] {$message}\n", FILE_APPEND );
@@ -44,7 +23,9 @@ function wu_debug_log( $message ) {
     }
 }
 
-// ===== 資料表安裝 / 更新 =====
+// ===== 資料表版本管理 =====
+
+define( 'WU_EMAIL_TRACKER_DB_VERSION', '1.1' );
 
 function wu_email_tracker_install() {
     global $wpdb;
@@ -78,7 +59,6 @@ function wu_email_tracker_check_columns( $table_name ) {
     global $wpdb;
     $columns          = $wpdb->get_results( "SHOW COLUMNS FROM {$table_name}" );
     $existing_columns = array_column( (array) $columns, 'Field' );
-
     if ( ! in_array( 'send_method', $existing_columns ) ) {
         $wpdb->query( "ALTER TABLE {$table_name} ADD COLUMN send_method varchar(50) DEFAULT 'default' AFTER sent_time" );
     }
@@ -110,15 +90,12 @@ add_action( 'admin_init', function () {
     add_option( 'wu_email_monthly_limit', 600 );
     add_option( 'wu_email_discord_webhook', '' );
     add_option( 'wu_email_send_method', 'default' );
-    // Resend
     add_option( 'wu_email_resend_api_key', '' );
     add_option( 'wu_email_resend_from_email', '' );
     add_option( 'wu_email_resend_from_name', get_bloginfo( 'name' ) );
-    // Brevo
     add_option( 'wu_email_brevo_api_key', '' );
     add_option( 'wu_email_brevo_from_email', '' );
     add_option( 'wu_email_brevo_from_name', get_bloginfo( 'name' ) );
-    // SMTP
     add_option( 'wu_email_smtp_host', '' );
     add_option( 'wu_email_smtp_port', '587' );
     add_option( 'wu_email_smtp_encryption', 'tls' );
@@ -129,32 +106,18 @@ add_action( 'admin_init', function () {
     add_option( 'wu_email_debug_enabled', 0 );
 } );
 
-// ===== 全域狀態旗標 =====
-
-global $wu_api_email_sent;
-$wu_api_email_sent = false;
-
-// ===== 選單註冊（隱藏選單，透過外掛頁面「設定」連結進入）=====
+// ===== 選單註冊（掛載於 wumetax-toolkit）=====
 
 add_action( 'admin_menu', function () {
-    // 掛在 Settings 下但不顯示於側邊欄，僅供直接 URL 存取
     add_submenu_page(
-        null,                            // 父選單設為 null → 不顯示在側邊欄
-        'WU Email Tracker',
-        'WU Email Tracker',
+        'wumetax-toolkit',
+        '郵件追蹤管理',
+        '郵件追蹤管理',
         'manage_options',
         'wu-email-tracker',
         'wu_email_tracker_settings_page'
     );
-} );
-
-// ===== 外掛列表「設定」快捷連結 =====
-
-add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), function ( $links ) {
-    $settings_link = '<a href="' . admin_url( 'admin.php?page=wu-email-tracker' ) . '">設定</a>';
-    array_unshift( $links, $settings_link );
-    return $links;
-} );
+}, 999 );
 
 // ===== Dashboard Widget =====
 
@@ -258,12 +221,12 @@ function wu_render_email_tracker_dashboard() {
             <?php if ( $is_blocked ) : ?>
             <div class="wu-notice wu-notice-error" style="margin-top:20px;">
                 <strong>發信額度已達上限</strong><br>
-                <?php if ( $today_count >= $daily_limit ) : ?>今日發信已達到每日限制 (<?php echo $daily_limit; ?> 封),系統已自動阻擋新郵件發送。<br><?php endif; ?>
-                <?php if ( $month_count >= $monthly_limit ) : ?>本月發信已達到每月限制 (<?php echo $monthly_limit; ?> 封),系統已自動阻擋新郵件發送。<br><?php endif; ?>
+                <?php if ( $today_count >= $daily_limit ) : ?>今日發信已達到每日限制 (<?php echo $daily_limit; ?> 封)，系統已自動阻擋新郵件發送。<br><?php endif; ?>
+                <?php if ( $month_count >= $monthly_limit ) : ?>本月發信已達到每月限制 (<?php echo $monthly_limit; ?> 封)，系統已自動阻擋新郵件發送。<br><?php endif; ?>
             </div>
             <?php elseif ( $daily_pct >= 80 || $monthly_pct >= 80 ) : ?>
             <div class="wu-notice" style="margin-top:20px;background:#fcf3cf;border-color:#996800;">
-                <strong>額度即將達到上限</strong><br>請注意發信數量,避免超過額度限制。
+                <strong>額度即將達到上限</strong><br>請注意發信數量，避免超過額度限制。
             </div>
             <?php endif; ?>
         </div>
@@ -303,12 +266,10 @@ function wu_send_email_via_resend( $to, $subject, $message ) {
     wu_debug_log( 'Resend API: Attempting to send email to ' . ( is_array( $to ) ? $to[0] : $to ) );
 
     if ( empty( $api_key ) || empty( $from_email ) ) {
-        wu_debug_log( 'Resend API: Missing API key or from email' );
         return array( 'success' => false, 'error' => 'API Key 或發件者 Email 未設定' );
     }
 
-    $to_email     = is_array( $to ) ? $to[0] : $to;
-    $html_message = wpautop( $message );
+    $to_email = is_array( $to ) ? $to[0] : $to;
 
     $response = wp_remote_post( 'https://api.resend.com/emails', array(
         'headers' => array(
@@ -319,7 +280,7 @@ function wu_send_email_via_resend( $to, $subject, $message ) {
             'from'    => "{$from_name} <{$from_email}>",
             'to'      => array( $to_email ),
             'subject' => $subject,
-            'html'    => $html_message,
+            'html'    => wpautop( $message ),
         ) ),
         'timeout' => 30,
     ) );
@@ -344,7 +305,7 @@ function wu_send_email_via_resend( $to, $subject, $message ) {
     return array( 'success' => false, 'error' => $error_msg );
 }
 
-// ===== Brevo (Sendinblue) API =====
+// ===== Brevo API =====
 
 function wu_send_email_via_brevo( $to, $subject, $message ) {
     $api_key    = get_option( 'wu_email_brevo_api_key', '' );
@@ -354,21 +315,10 @@ function wu_send_email_via_brevo( $to, $subject, $message ) {
     wu_debug_log( 'Brevo API: Attempting to send email to ' . ( is_array( $to ) ? $to[0] : $to ) );
 
     if ( empty( $api_key ) || empty( $from_email ) ) {
-        wu_debug_log( 'Brevo API: Missing API key or from email' );
         return array( 'success' => false, 'error' => 'Brevo API Key 或發件者 Email 未設定' );
     }
 
-    $to_email     = is_array( $to ) ? $to[0] : $to;
-    $html_message = wpautop( $message );
-
-    $body_data = array(
-        'sender'      => array( 'name' => $from_name, 'email' => $from_email ),
-        'to'          => array( array( 'email' => $to_email ) ),
-        'subject'     => $subject,
-        'htmlContent' => $html_message,
-    );
-
-    wu_debug_log( 'Brevo API: Sending request to api.brevo.com' );
+    $to_email = is_array( $to ) ? $to[0] : $to;
 
     $response = wp_remote_post( 'https://api.brevo.com/v3/smtp/email', array(
         'headers' => array(
@@ -376,7 +326,12 @@ function wu_send_email_via_brevo( $to, $subject, $message ) {
             'Content-Type' => 'application/json',
             'Accept'       => 'application/json',
         ),
-        'body'    => json_encode( $body_data ),
+        'body'    => json_encode( array(
+            'sender'      => array( 'name' => $from_name, 'email' => $from_email ),
+            'to'          => array( array( 'email' => $to_email ) ),
+            'subject'     => $subject,
+            'htmlContent' => wpautop( $message ),
+        ) ),
         'timeout' => 30,
     ) );
 
@@ -389,7 +344,6 @@ function wu_send_email_via_brevo( $to, $subject, $message ) {
     $status_code = wp_remote_retrieve_response_code( $response );
     wu_debug_log( 'Brevo API: Response code ' . $status_code );
 
-    // Brevo 成功回傳 201 Created，包含 messageId
     if ( in_array( $status_code, array( 200, 201 ), true ) && isset( $resp_body['messageId'] ) ) {
         wu_debug_log( 'Brevo API: Success! messageId: ' . $resp_body['messageId'] );
         return array( 'success' => true, 'id' => $resp_body['messageId'] );
@@ -398,7 +352,6 @@ function wu_send_email_via_brevo( $to, $subject, $message ) {
     $error_msg = isset( $resp_body['message'] ) ? $resp_body['message'] : 'Unknown error (HTTP ' . $status_code . ')';
     if ( isset( $resp_body['code'] ) ) $error_msg = $resp_body['code'] . ': ' . $error_msg;
     wu_debug_log( 'Brevo API: Failed - ' . $error_msg );
-    wu_debug_log( 'Brevo API: Full response - ' . json_encode( $resp_body ) );
     return array( 'success' => false, 'error' => $error_msg );
 }
 
@@ -417,10 +370,7 @@ function wu_configure_smtp( $phpmailer ) {
     $smtp_from_email = get_option( 'wu_email_smtp_from_email', '' );
     $smtp_from_name  = get_option( 'wu_email_smtp_from_name', get_bloginfo( 'name' ) );
 
-    if ( empty( $smtp_host ) ) {
-        wu_debug_log( 'SMTP: Host is empty, skipping configuration' );
-        return;
-    }
+    if ( empty( $smtp_host ) ) return;
 
     $phpmailer->isSMTP();
     $phpmailer->Host       = $smtp_host;
@@ -431,34 +381,50 @@ function wu_configure_smtp( $phpmailer ) {
     $phpmailer->SMTPSecure = ( $smtp_encryption === 'none' ) ? '' : $smtp_encryption;
     $phpmailer->From       = $smtp_from_email;
     $phpmailer->FromName   = $smtp_from_name;
-    wu_debug_log( "SMTP: Configured - Host:{$smtp_host} Port:{$smtp_port} Enc:{$smtp_encryption}" );
+    wu_debug_log( "SMTP: Configured - Host:{$smtp_host} Port:{$smtp_port}" );
 }
 
 // ===== 核心攔截邏輯 =====
+// 
+// ★ 修正 Elementor 表單錯誤的關鍵 ★
+//
+// 問題根源：原本用 wp_mail filter 攔截後設 $args['to'] = '' 清空收件者，
+// phpmailer 收到空收件者回傳 false，Elementor 誤判為發信失敗顯示錯誤訊息。
+//
+// 修正方式：改用 pre_wp_mail filter (WP 5.7+)。
+// 當 API 模式時，在此 filter 中直接完成發信並回傳 true，
+// wp_mail() 收到 true 後短路返回，Elementor 得到成功回應。
+// 額度阻擋時回傳 false（正確行為，阻止發信）。
+// Default/SMTP 模式返回 null，讓 wp_mail 繼續正常走 phpmailer 流程。
 
-add_filter( 'wp_mail', 'wu_intercept_email', 1 );
+add_filter( 'pre_wp_mail', 'wu_pre_wp_mail_handler', 1, 2 );
 
-function wu_intercept_email( $args ) {
-    wu_debug_log( '=== wp_mail filter TRIGGERED ===' );
+function wu_pre_wp_mail_handler( $return, $atts ) {
+    wu_debug_log( '=== pre_wp_mail filter TRIGGERED ===' );
 
     if ( ! get_option( 'wu_email_tracker_enabled', 1 ) ) {
-        wu_debug_log( 'Tracker DISABLED, skipping.' );
-        return $args;
+        wu_debug_log( 'Tracker DISABLED, passing through.' );
+        return null; // 讓 wp_mail 正常走
     }
 
     global $wpdb;
     $table = $wpdb->prefix . 'wu_email_logs';
 
+    // 確保資料表存在
     if ( ! $wpdb->get_var( "SHOW TABLES LIKE '{$table}'" ) ) {
         wu_email_tracker_install();
         if ( ! $wpdb->get_var( "SHOW TABLES LIKE '{$table}'" ) ) {
-            wu_debug_log( 'CRITICAL: Cannot create table, skipping tracking.' );
-            return $args;
+            wu_debug_log( 'CRITICAL: Cannot create table, passing through.' );
+            return null;
         }
     }
 
-    $to_email      = is_array( $args['to'] ) ? implode( ', ', $args['to'] ) : $args['to'];
-    $subject       = isset( $args['subject'] ) ? $args['subject'] : '(無主旨)';
+    $to       = isset( $atts['to'] ) ? $atts['to'] : '';
+    $subject  = isset( $atts['subject'] ) ? $atts['subject'] : '(無主旨)';
+    $message  = isset( $atts['message'] ) ? $atts['message'] : '';
+    $to_email = is_array( $to ) ? implode( ', ', $to ) : $to;
+
+    // 額度檢查
     $today_start   = date( 'Y-m-d 00:00:00' );
     $month_start   = date( 'Y-m-01 00:00:00' );
     $today_count   = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$table} WHERE sent_time >= %s AND status = 'sent'", $today_start ) );
@@ -468,7 +434,6 @@ function wu_intercept_email( $args ) {
 
     wu_debug_log( "Quota: Today {$today_count}/{$daily_limit}, Month {$month_count}/{$monthly_limit}" );
 
-    // 超過額度 → 阻擋
     if ( $today_count >= $daily_limit || $month_count >= $monthly_limit ) {
         wu_debug_log( 'QUOTA EXCEEDED - blocking email.' );
         $wpdb->insert( $table, array(
@@ -480,8 +445,8 @@ function wu_intercept_email( $args ) {
             'sent_time'     => current_time( 'mysql' ),
         ), array( '%s', '%s', '%s', '%s', '%s', '%s' ) );
         wu_send_quota_alert( 'blocked', $to_email, $subject );
-        $args['to'] = '';
-        return $args;
+        // 回傳 false → wp_mail() 回傳 false，Elementor 會知道確實失敗（正確）
+        return false;
     }
 
     $send_method = get_option( 'wu_email_send_method', 'default' );
@@ -489,8 +454,8 @@ function wu_intercept_email( $args ) {
 
     // ── Resend API ──
     if ( $send_method === 'resend' ) {
-        $result = wu_send_email_via_resend( $args['to'], $args['subject'], $args['message'] );
-
+        wu_debug_log( 'Using Resend API...' );
+        $result = wu_send_email_via_resend( $to, $subject, $message );
         if ( $result['success'] ) {
             $wpdb->insert( $table, array(
                 'to_email'      => $to_email,
@@ -500,8 +465,7 @@ function wu_intercept_email( $args ) {
                 'error_message' => 'Message ID: ' . $result['id'],
                 'sent_time'     => current_time( 'mysql' ),
             ), array( '%s', '%s', '%s', '%s', '%s', '%s' ) );
-            global $wu_api_email_sent;
-            $wu_api_email_sent = true;
+            wu_debug_log( 'Resend SUCCESS' );
         } else {
             $wpdb->insert( $table, array(
                 'to_email'      => $to_email,
@@ -511,17 +475,17 @@ function wu_intercept_email( $args ) {
                 'send_method'   => 'resend_api',
                 'sent_time'     => current_time( 'mysql' ),
             ), array( '%s', '%s', '%s', '%s', '%s', '%s' ) );
+            wu_debug_log( 'Resend FAILED: ' . $result['error'] );
         }
         wu_check_quota_warning();
-        // 已由 API 發送，阻止 wp_mail 再透過 phpmailer 發一次
-        $args['to'] = '';
-        return $args;
+        // ★ 回傳 true（成功）或 false（失敗）→ wp_mail() 正確回傳，Elementor 不顯示錯誤
+        return $result['success'] ? true : false;
     }
 
     // ── Brevo API ──
     if ( $send_method === 'brevo' ) {
-        $result = wu_send_email_via_brevo( $args['to'], $args['subject'], $args['message'] );
-
+        wu_debug_log( 'Using Brevo API...' );
+        $result = wu_send_email_via_brevo( $to, $subject, $message );
         if ( $result['success'] ) {
             $wpdb->insert( $table, array(
                 'to_email'      => $to_email,
@@ -531,8 +495,7 @@ function wu_intercept_email( $args ) {
                 'error_message' => 'Message ID: ' . $result['id'],
                 'sent_time'     => current_time( 'mysql' ),
             ), array( '%s', '%s', '%s', '%s', '%s', '%s' ) );
-            global $wu_api_email_sent;
-            $wu_api_email_sent = true;
+            wu_debug_log( 'Brevo SUCCESS' );
         } else {
             $wpdb->insert( $table, array(
                 'to_email'      => $to_email,
@@ -542,14 +505,69 @@ function wu_intercept_email( $args ) {
                 'send_method'   => 'brevo_api',
                 'sent_time'     => current_time( 'mysql' ),
             ), array( '%s', '%s', '%s', '%s', '%s', '%s' ) );
+            wu_debug_log( 'Brevo FAILED: ' . $result['error'] );
         }
         wu_check_quota_warning();
-        // 已由 API 發送，阻止 phpmailer 重複發送
+        // ★ 同上，正確回傳給 Elementor
+        return $result['success'] ? true : false;
+    }
+
+    // ── Default / SMTP ──
+    // 回傳 null → wp_mail 繼續正常走 phpmailer 流程
+    // 追蹤紀錄改用 wp_mail filter 補記
+    wu_debug_log( 'Default/SMTP mode, passing to phpmailer.' );
+    return null;
+}
+
+// Default / SMTP 模式的追蹤：用 wp_mail filter 補記
+// （此 filter 在 pre_wp_mail = null 時才會繼續執行）
+add_filter( 'wp_mail', 'wu_track_default_smtp_email', 1 );
+
+function wu_track_default_smtp_email( $args ) {
+    $send_method = get_option( 'wu_email_send_method', 'default' );
+
+    // 只在 default / smtp 模式下記錄（API 模式已在 pre_wp_mail 處理）
+    if ( in_array( $send_method, array( 'resend', 'brevo' ), true ) ) {
+        return $args;
+    }
+
+    if ( ! get_option( 'wu_email_tracker_enabled', 1 ) ) {
+        return $args;
+    }
+
+    global $wpdb;
+    $table = $wpdb->prefix . 'wu_email_logs';
+
+    if ( ! $wpdb->get_var( "SHOW TABLES LIKE '{$table}'" ) ) {
+        return $args;
+    }
+
+    $to_email = is_array( $args['to'] ) ? implode( ', ', $args['to'] ) : $args['to'];
+    $subject  = isset( $args['subject'] ) ? $args['subject'] : '(無主旨)';
+
+    // 額度阻擋（double-check，pre_wp_mail 已處理，但保留作保護）
+    $today_start   = date( 'Y-m-d 00:00:00' );
+    $month_start   = date( 'Y-m-01 00:00:00' );
+    $today_count   = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$table} WHERE sent_time >= %s AND status = 'sent'", $today_start ) );
+    $month_count   = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$table} WHERE sent_time >= %s AND status = 'sent'", $month_start ) );
+    $daily_limit   = (int) get_option( 'wu_email_daily_limit', 20 );
+    $monthly_limit = (int) get_option( 'wu_email_monthly_limit', 600 );
+
+    if ( $today_count >= $daily_limit || $month_count >= $monthly_limit ) {
+        wu_debug_log( 'QUOTA EXCEEDED (wp_mail filter) - blocking.' );
+        $wpdb->insert( $table, array(
+            'to_email'      => $to_email,
+            'subject'       => $subject,
+            'status'        => 'blocked',
+            'error_message' => '超過每日或每月發信額度限制',
+            'send_method'   => $send_method,
+            'sent_time'     => current_time( 'mysql' ),
+        ), array( '%s', '%s', '%s', '%s', '%s', '%s' ) );
+        wu_send_quota_alert( 'blocked', $to_email, $subject );
         $args['to'] = '';
         return $args;
     }
 
-    // ── Default / SMTP (透過 phpmailer) ──
     $method_label = ( $send_method === 'smtp' ) ? 'smtp' : 'default';
     $wpdb->insert( $table, array(
         'to_email'    => $to_email,
@@ -563,6 +581,8 @@ function wu_intercept_email( $args ) {
     return $args;
 }
 
+// ===== 額度警告 & Discord =====
+
 function wu_check_quota_warning() {
     global $wpdb;
     $table         = $wpdb->prefix . 'wu_email_logs';
@@ -574,10 +594,10 @@ function wu_check_quota_warning() {
     $monthly_pct   = $monthly_limit > 0 ? ( $month_count / $monthly_limit ) * 100 : 0;
 
     if ( $daily_pct >= 80 || $monthly_pct >= 80 ) {
-        $transient_key = 'wu_email_quota_warning_' . date( 'Y-m-d' );
-        if ( ! get_transient( $transient_key ) ) {
+        $key = 'wu_email_quota_warning_' . date( 'Y-m-d' );
+        if ( ! get_transient( $key ) ) {
             wu_send_quota_alert( 'warning' );
-            set_transient( $transient_key, 1, DAY_IN_SECONDS );
+            set_transient( $key, 1, DAY_IN_SECONDS );
         }
     }
 }
@@ -597,19 +617,19 @@ function wu_send_quota_alert( $type, $to_email = '', $subject = '' ) {
         $title  = '🚫 郵件發送已被阻擋';
         $color  = 15158332;
         $fields = array(
-            array( 'name' => '網站', 'value' => home_url(), 'inline' => false ),
-            array( 'name' => '收件者', 'value' => $to_email, 'inline' => true ),
-            array( 'name' => '主旨', 'value' => $subject, 'inline' => false ),
-            array( 'name' => '今日發送', 'value' => "{$today_count} / {$daily_limit} 封", 'inline' => true ),
-            array( 'name' => '本月發送', 'value' => "{$month_count} / {$monthly_limit} 封", 'inline' => true ),
+            array( 'name' => '網站',   'value' => home_url(),                         'inline' => false ),
+            array( 'name' => '收件者', 'value' => $to_email,                           'inline' => true ),
+            array( 'name' => '主旨',   'value' => $subject,                            'inline' => false ),
+            array( 'name' => '今日',   'value' => "{$today_count} / {$daily_limit} 封", 'inline' => true ),
+            array( 'name' => '本月',   'value' => "{$month_count} / {$monthly_limit} 封", 'inline' => true ),
         );
     } else {
         $title  = '⚠️ 郵件額度警告';
         $color  = 16760576;
         $fields = array(
             array( 'name' => '網站', 'value' => home_url(), 'inline' => false ),
-            array( 'name' => '今日發送', 'value' => "{$today_count} / {$daily_limit} 封", 'inline' => true ),
-            array( 'name' => '本月發送', 'value' => "{$month_count} / {$monthly_limit} 封", 'inline' => true ),
+            array( 'name' => '今日', 'value' => "{$today_count} / {$daily_limit} 封",    'inline' => true ),
+            array( 'name' => '本月', 'value' => "{$month_count} / {$monthly_limit} 封",  'inline' => true ),
         );
     }
 
@@ -645,17 +665,16 @@ function wu_test_email_handler() {
 
     $send_method = get_option( 'wu_email_send_method', 'default' );
 
-    // API 發信方式直接呼叫，避免 wp_mail 被攔截後 $args['to'] 清空造成誤判
+    // API 模式直接呼叫，完全繞過 wp_mail
     if ( $send_method === 'resend' ) {
         $result = wu_send_email_via_resend(
             $test_email,
             '測試郵件 - WU Email Tracker',
             '這是一封測試郵件，用於確認 Resend API 是否正常運作。<br><br>發送時間: ' . current_time( 'Y-m-d H:i:s' ) . '<br>網站: ' . home_url()
         );
-        // 手動記錄
         wu_log_api_test( $test_email, $result, 'resend_api' );
         $result['success']
-            ? wp_send_json_success( array( 'message' => '✅ 測試郵件已透過 Resend API 發送成功！請重新整理頁面查看記錄。' ) )
+            ? wp_send_json_success( array( 'message' => '✅ 測試郵件已透過 Resend API 發送！請重新整理頁面查看記錄。' ) )
             : wp_send_json_error( array( 'message' => '❌ 發送失敗：' . $result['error'] ) );
         return;
     }
@@ -668,12 +687,12 @@ function wu_test_email_handler() {
         );
         wu_log_api_test( $test_email, $result, 'brevo_api' );
         $result['success']
-            ? wp_send_json_success( array( 'message' => '✅ 測試郵件已透過 Brevo API 發送成功！請重新整理頁面查看記錄。' ) )
+            ? wp_send_json_success( array( 'message' => '✅ 測試郵件已透過 Brevo API 發送！請重新整理頁面查看記錄。' ) )
             : wp_send_json_error( array( 'message' => '❌ 發送失敗：' . $result['error'] ) );
         return;
     }
 
-    // Default / SMTP 使用 wp_mail
+    // Default / SMTP
     $mail_result = wp_mail(
         $test_email,
         '測試郵件 - WU Email Tracker',
@@ -717,7 +736,7 @@ function wu_email_tracker_settings_page() {
 
     if ( ! $password_verified ) { ?>
         <div class="wrap">
-            <h1>WU 郵件追蹤管理</h1>
+            <h1>郵件追蹤管理</h1>
             <div style="max-width:500px;margin:50px auto;background:#fff;padding:40px;border:1px solid #ddd;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
                 <h2 style="text-align:center;margin-top:0;color:#1d2327;">需要管理密碼</h2>
                 <p style="text-align:center;color:#646970;margin-bottom:30px;">此頁面需要管理密碼才能存取</p>
@@ -758,15 +777,12 @@ function wu_email_tracker_settings_page() {
         update_option( 'wu_email_discord_webhook', esc_url_raw( $_POST['discord_webhook'] ?? '' ) );
         update_option( 'wu_email_send_method', sanitize_text_field( $_POST['send_method'] ?? 'default' ) );
         update_option( 'wu_email_debug_enabled', isset( $_POST['debug_enabled'] ) ? 1 : 0 );
-        // Resend
         update_option( 'wu_email_resend_api_key', sanitize_text_field( $_POST['resend_api_key'] ?? '' ) );
         update_option( 'wu_email_resend_from_email', sanitize_email( $_POST['resend_from_email'] ?? '' ) );
         update_option( 'wu_email_resend_from_name', sanitize_text_field( $_POST['resend_from_name'] ?? '' ) );
-        // Brevo
         update_option( 'wu_email_brevo_api_key', sanitize_text_field( $_POST['brevo_api_key'] ?? '' ) );
         update_option( 'wu_email_brevo_from_email', sanitize_email( $_POST['brevo_from_email'] ?? '' ) );
         update_option( 'wu_email_brevo_from_name', sanitize_text_field( $_POST['brevo_from_name'] ?? '' ) );
-        // SMTP
         update_option( 'wu_email_smtp_host', sanitize_text_field( $_POST['smtp_host'] ?? '' ) );
         update_option( 'wu_email_smtp_port', sanitize_text_field( $_POST['smtp_port'] ?? '587' ) );
         update_option( 'wu_email_smtp_encryption', sanitize_text_field( $_POST['smtp_encryption'] ?? 'tls' ) );
@@ -824,12 +840,7 @@ function wu_email_tracker_settings_page() {
     $total_count   = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$table}" );
 
     $method_labels = array( 'resend' => 'Resend API', 'brevo' => 'Brevo API', 'smtp' => '自訂 SMTP' );
-    if ( isset( $method_labels[ $send_method ] ) ) {
-        $current_method_label = $method_labels[ $send_method ];
-    } else {
-        $smtp_info = wu_detect_smtp_plugin();
-        $current_method_label = $smtp_info['plugin_name'];
-    }
+    $current_method_label = isset( $method_labels[ $send_method ] ) ? $method_labels[ $send_method ] : wu_detect_smtp_plugin()['plugin_name'];
 
     $log_file    = WP_CONTENT_DIR . '/wu-email-tracker-debug.log';
     $log_exists  = file_exists( $log_file );
@@ -839,11 +850,16 @@ function wu_email_tracker_settings_page() {
 
     <div class="wrap">
         <div style="display:flex;justify-content:space-between;align-items:center;">
-            <h1>WU 郵件追蹤管理 <span style="font-size:14px;color:#666;font-weight:normal;">(v<?php echo WU_EMAIL_TRACKER_VERSION; ?>)</span></h1>
+            <h1>郵件追蹤管理 <span style="font-size:14px;color:#666;font-weight:normal;">(v3.6)</span></h1>
             <form method="post" style="margin:0;">
                 <?php wp_nonce_field( 'wu_email_logout' ); ?>
                 <?php submit_button( '登出管理', 'secondary small', 'wu_email_logout', false ); ?>
             </form>
+        </div>
+
+        <!-- 修正說明 -->
+        <div style="background:#e8f5e9;padding:12px 16px;border-left:4px solid #46b450;margin-top:15px;font-size:13px;">
+            ✅ <strong>v3.6 修正：</strong>改用 <code>pre_wp_mail</code> filter 攔截，Elementor / WooCommerce 表單不再顯示「Something went wrong. Mail not found.」錯誤。
         </div>
 
         <!-- 當前狀態 -->
@@ -869,7 +885,7 @@ function wu_email_tracker_settings_page() {
                     <div style="font-size:22px;font-weight:700;color:#0073aa;"><?php echo number_format( $total_count ); ?></div>
                 </div>
             </div>
-            <p style="margin:0;font-size:12px;color:#666;">DB 版本: <?php echo esc_html( $db_version ); ?> | 外掛版本: <?php echo WU_EMAIL_TRACKER_VERSION; ?></p>
+            <p style="margin:0;font-size:12px;color:#666;">DB 版本: <?php echo esc_html( $db_version ); ?></p>
         </div>
 
         <!-- 測試發信 -->
@@ -926,14 +942,14 @@ function wu_email_tracker_settings_page() {
                     <th>Debug 日誌</th>
                     <td>
                         <label><input type="checkbox" name="debug_enabled" value="1" <?php checked( 1, $debug_enabled ); ?>> <strong>啟用 Debug 日誌記錄</strong></label>
-                        <p class="description">記錄詳細的發信流程日誌（預設: 關閉，排查問題時開啟）</p>
+                        <p class="description">記錄詳細的發信流程日誌（排查問題時開啟）</p>
                     </td>
                 </tr>
                 <tr>
                     <th><label for="admin_password_new">更改管理密碼（選填）</label></th>
                     <td>
                         <input type="password" id="admin_password_new" name="admin_password_new" class="regular-text" placeholder="留空表示不更改">
-                        <p class="description">更改設定頁面的保護密碼</p>
+                        <p class="description">更改設定頁面的保護密碼（預設: A4h8A*73q$Ao*X）</p>
                     </td>
                 </tr>
             </table>
@@ -951,7 +967,7 @@ function wu_email_tracker_settings_page() {
                 </tr>
             </table>
 
-            <!-- Resend API 設定 -->
+            <!-- Resend 設定 -->
             <div class="wu-method-section" id="resend_section" style="display:none;">
                 <h3>🔑 Resend API 設定</h3>
                 <table class="form-table">
@@ -976,7 +992,7 @@ function wu_email_tracker_settings_page() {
                 </table>
             </div>
 
-            <!-- Brevo API 設定 -->
+            <!-- Brevo 設定 -->
             <div class="wu-method-section" id="brevo_section" style="display:none;">
                 <h3>🔑 Brevo API 設定 <span style="font-size:12px;color:#0092ff;font-weight:normal;">（原 Sendinblue）</span></h3>
                 <table class="form-table">
@@ -984,7 +1000,7 @@ function wu_email_tracker_settings_page() {
                         <th><label for="brevo_api_key">API Key</label></th>
                         <td>
                             <input type="text" id="brevo_api_key" name="brevo_api_key" value="<?php echo esc_attr( $brevo_api_key ); ?>" class="large-text" placeholder="xkeysib-...">
-                            <p class="description">至 <a href="https://app.brevo.com/settings/keys/api" target="_blank">Brevo → 設定 → API Keys</a> 取得 API Key</p>
+                            <p class="description">至 <a href="https://app.brevo.com/settings/keys/api" target="_blank">Brevo → 設定 → API Keys</a> 取得</p>
                         </td>
                     </tr>
                     <tr>
@@ -1024,8 +1040,8 @@ function wu_email_tracker_settings_page() {
                         <th><label for="smtp_encryption">加密方式</label></th>
                         <td>
                             <select id="smtp_encryption" name="smtp_encryption">
-                                <option value="tls" <?php selected( 'tls', $smtp_encryption ); ?>>TLS</option>
-                                <option value="ssl" <?php selected( 'ssl', $smtp_encryption ); ?>>SSL</option>
+                                <option value="tls"  <?php selected( 'tls',  $smtp_encryption ); ?>>TLS</option>
+                                <option value="ssl"  <?php selected( 'ssl',  $smtp_encryption ); ?>>SSL</option>
                                 <option value="none" <?php selected( 'none', $smtp_encryption ); ?>>無加密</option>
                             </select>
                         </td>
@@ -1066,8 +1082,7 @@ function wu_email_tracker_settings_page() {
             <div style="margin-top:20px;background:#fff;padding:15px;border:1px solid #ddd;max-height:300px;overflow-y:auto;">
                 <h4 style="margin-top:0;">最近 50 行日誌：</h4>
                 <pre style="font-size:11px;line-height:1.4;margin:0;"><?php
-                $lines = file( $log_file );
-                echo esc_html( implode( '', array_slice( $lines, -50 ) ) );
+                echo esc_html( implode( '', array_slice( file( $log_file ), -50 ) ) );
                 ?></pre>
             </div>
         </div>
@@ -1133,11 +1148,12 @@ function wu_email_tracker_settings_page() {
         <div class="notice notice-info" style="padding:15px;margin-top:20px;">
             <p style="margin:0;"><strong>系統說明</strong></p>
             <ul style="margin:8px 0 0 20px;line-height:1.9;">
+                <li><strong>Elementor 相容性：</strong>使用 <code>pre_wp_mail</code> filter，wp_mail() 正確回傳 true/false，表單不顯示假錯誤</li>
                 <li><strong>發信方式：</strong>支援 Default / Resend API / Brevo API / SMTP 四種</li>
                 <li><strong>Brevo 免費額度：</strong>每日 300 封，每月 9,000 封，無需信用卡</li>
                 <li><strong>額度管理：</strong>可設定每日/每月發信上限，超過自動阻擋</li>
                 <li><strong>通知：</strong>支援 Discord Webhook（阻擋 / 80% 警告）</li>
-                <li><strong>Debug 日誌：</strong>預設關閉，排查問題時啟用，日誌位於 <code>wp-content/wu-email-tracker-debug.log</code></li>
+                <li><strong>Debug 日誌：</strong>預設關閉，日誌位於 <code>wp-content/wu-email-tracker-debug.log</code></li>
             </ul>
         </div>
     </div>
@@ -1182,7 +1198,7 @@ function wu_email_tracker_settings_page() {
     <?php
 }
 
-// ===== 自動清理舊紀錄 =====
+// ===== 自動清理 =====
 
 add_action( 'wp_scheduled_delete', 'wu_email_tracker_clean_old_records' );
 
