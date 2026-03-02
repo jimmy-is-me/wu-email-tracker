@@ -1,11 +1,11 @@
 <?php
 /**
  * Plugin Name: WU Email Tracker
- * Plugin URI:  https://wulk.cc
+ * Plugin URI:  https://wumetax.com
  * Description: WordPress 郵件追蹤與管理系統 - 支援額度管理、Resend API、Brevo API、SMTP、Discord 通知
  * Version:     1.1.0
  * Author:      Wumetax
- * Author URI:  https://wulk.cc
+ * Author URI:  https://wumetax.com
  * License:     GPL-2.0+
  * Text Domain: wu-email-tracker
  * Requires at least: 5.8
